@@ -13,8 +13,33 @@ const app = new Hono<{ Bindings: Bindings }>();
 // Enable CORS for testing from browser / Scalar UI
 app.use('*', cors());
 
-// OpenAPI 3.1.0 Specification Definition
-const openApiSpec = {
+// Fungsi pembantu untuk membuat OpenAPI Specification dengan server URL dinamis
+function getOpenApiSpec(origin?: string) {
+  const currentOrigin = origin || 'http://localhost:8787';
+  const isLocal = currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1');
+
+  const servers = [
+    {
+      url: currentOrigin,
+      description: isLocal ? 'Current environment (Development)' : 'Current environment (Production)',
+    },
+  ];
+
+  if (!isLocal) {
+    servers.push({
+      url: 'http://localhost:8787',
+      description: 'Local development server',
+    });
+  }
+
+  return {
+    ...baseOpenApiSpec,
+    servers,
+  };
+}
+
+// OpenAPI 3.1.0 Specification Definition (Base)
+const baseOpenApiSpec = {
   openapi: '3.1.0',
   info: {
     title: 'Cabe Chatbot RAG API',
@@ -22,12 +47,6 @@ const openApiSpec = {
     description:
       'API RAG (Retrieval-Augmented Generation) berbasis Cloudflare Workers (Free Tier), D1 Database, Vectorize, dan Workers AI menggunakan Hono.js.',
   },
-  servers: [
-    {
-      url: 'http://localhost:8787',
-      description: 'Local development server',
-    },
-  ],
   paths: {
     '/ingest': {
       post: {
@@ -185,18 +204,22 @@ const openApiSpec = {
 
 // Endpoint untuk menyajikan OpenAPI JSON Specification
 app.get('/openapi.json', (c) => {
-  return c.json(openApiSpec);
+  const origin = new URL(c.req.url).origin;
+  return c.json(getOpenApiSpec(origin));
 });
 
 // Scalar API Reference Documentation UI
 app.get(
   '/reference',
-  apiReference({
-    pageTitle: 'Cabe Chatbot API Documentation',
-    theme: 'purple',
-    spec: {
-      content: openApiSpec,
-    },
+  apiReference((c: any) => {
+    const origin = new URL(c.req.url).origin;
+    return {
+      pageTitle: 'Cabe Chatbot API Documentation',
+      theme: 'purple',
+      spec: {
+        content: getOpenApiSpec(origin),
+      },
+    };
   })
 );
 
