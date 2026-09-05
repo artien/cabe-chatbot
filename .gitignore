@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+dist/
+*.log
+.DS_Store
+.env
+.env.local
+
+# Optional: Ignore temporary AI/IDE folders if you don't want to track them
+.claude/
+.agents

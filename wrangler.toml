@@ -1,0 +1,14 @@
+name = "cabe-chatbot"
+compatibility_date = "2024-03-20"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cabe-chatbot-db"
+database_id = "default" # This will be replaced when actually creating the DB
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "cabe-chatbot-index"

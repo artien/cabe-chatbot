@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  text_content TEXT NOT NULL,
+  source_url TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
