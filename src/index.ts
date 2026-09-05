@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { apiReference } from '@scalar/hono-api-reference';
 
 type Bindings = {
   DB: D1Database;
@@ -7,6 +9,199 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+
+// Enable CORS for testing from browser / Scalar UI
+app.use('*', cors());
+
+// OpenAPI 3.1.0 Specification Definition
+const openApiSpec = {
+  openapi: '3.1.0',
+  info: {
+    title: 'Cabe Chatbot RAG API',
+    version: '1.0.0',
+    description:
+      'API RAG (Retrieval-Augmented Generation) berbasis Cloudflare Workers (Free Tier), D1 Database, Vectorize, dan Workers AI menggunakan Hono.js.',
+  },
+  servers: [
+    {
+      url: 'http://localhost:8787',
+      description: 'Local development server',
+    },
+  ],
+  paths: {
+    '/ingest': {
+      post: {
+        summary: 'Ingest Document (HTML atau URL)',
+        description:
+          'Menerima dokumen HTML atau URL halaman web, mengekstrak konten teks bernilai, memecahnya menjadi potongan teks (*chunks*), membuat vektor embedding dengan Workers AI (`@cf/baai/bge-m3`), serta menyimpannya ke D1 Database dan Vectorize.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  url: {
+                    type: 'string',
+                    format: 'uri',
+                    description: 'URL halaman web yang ingin diambil dan di-ingest secara otomatis.',
+                    example: 'https://example.com',
+                  },
+                  html: {
+                    type: 'string',
+                    description: 'Konten mentah HTML (opsional jika `url` sudah disediakan).',
+                    example: '<html><body><h1>Judul Dokumen</h1><p>Penjelasan konten dokumen...</p></body></html>',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Dokumen berhasil di-ingest dan disimpan ke D1 & Vectorize.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    message: { type: 'string', example: 'Ingested 2 chunks successfully' },
+                    ids: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      example: ['d9e6f3b0-2b1b-4f8a-9f8a-2b1b4f8a9f8a'],
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': {
+            description: 'Bad Request - Field `html` atau `url` tidak ditemukan atau konten kosong.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Missing html or url field in request body' },
+                  },
+                },
+              },
+            },
+          },
+          '500': {
+            description: 'Internal Server Error.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Failed to ingest document' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/chat': {
+      post: {
+        summary: 'Tanya Dokumen (Chat RAG)',
+        description:
+          'Menerima pertanyaan user, membuat embedding dari pertanyaan, melakukan similarity search di Vectorize Index, mengambil potongan dokumen teks asli dari D1 Database, dan menghasilkan jawaban cerdas menggunakan LLM `@cf/meta/llama-3.2-3b-instruct`.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['question'],
+                properties: {
+                  question: {
+                    type: 'string',
+                    description: 'Pertanyaan pengguna yang ingin dijawab berdasarkan dokumen yang telah di-ingest.',
+                    example: 'Apa isi dari dokumen yang di-ingest tadi?',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Jawaban berhasil di-generate berdasarkan konteks dokumen.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    answer: {
+                      type: 'string',
+                      example: 'Berdasarkan dokumen yang disediakan, Cloudflare Workers adalah...',
+                    },
+                    context_used: {
+                      type: 'integer',
+                      description: 'Jumlah potongan teks referensi D1 yang digunakan sebagai konteks LLM.',
+                      example: 2,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': {
+            description: 'Bad Request - Parameter pertanyaan tidak ada.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Missing question field in request body' },
+                  },
+                },
+              },
+            },
+          },
+          '500': {
+            description: 'Internal Server Error.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Failed to process chat request' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+// Endpoint untuk menyajikan OpenAPI JSON Specification
+app.get('/openapi.json', (c) => {
+  return c.json(openApiSpec);
+});
+
+// Scalar API Reference Documentation UI
+app.get(
+  '/reference',
+  apiReference({
+    pageTitle: 'Cabe Chatbot API Documentation',
+    theme: 'purple',
+    spec: {
+      content: openApiSpec,
+    },
+  })
+);
+
+// Redirect root / ke /reference untuk kemudahan akses
+app.get('/', (c) => c.redirect('/reference'));
 
 // Decode common HTML entities
 function decodeHtmlEntities(text: string): string {
@@ -118,6 +313,22 @@ function chunkText(text: string, maxLength: number = 1000): string[] {
 
 app.post('/ingest', async (c) => {
   try {
+    if (!c.env.VECTORIZE) {
+      return c.json(
+        {
+          error:
+            'VECTORIZE binding is undefined. Jalankan server lokal dengan mode remote menggunakan: `npm run dev` (atau `wrangler dev --remote`) agar Vectorize terikat ke Cloudflare.',
+        },
+        500
+      );
+    }
+    if (!c.env.DB) {
+      return c.json({ error: 'DB (D1) binding is undefined.' }, 500);
+    }
+    if (!c.env.AI) {
+      return c.json({ error: 'AI (Workers AI) binding is undefined.' }, 500);
+    }
+
     const body = await c.req.json();
     let html = body.html;
     const sourceUrl = body.url || 'unknown';
@@ -152,31 +363,35 @@ app.post('/ingest', async (c) => {
     // Chunk the text
     const chunks = chunkText(plainText, 1000);
     
-    // Process each chunk
-    const insertedIds = [];
-    for (const chunk of chunks) {
-      const id = crypto.randomUUID();
-      
-      // Generate embedding
-      const { data } = await c.env.AI.run('@cf/baai/bge-base-en-v1.5', {
-        text: [chunk]
+    // Process chunks in batches for high-speed parallel ingest
+    const BATCH_SIZE = 25;
+    const insertedIds: string[] = [];
+
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batchChunks = chunks.slice(i, i + BATCH_SIZE);
+      const batchIds = batchChunks.map(() => crypto.randomUUID());
+
+      // 1. Generate embeddings for all chunks in the batch in a single call
+      const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
+        text: batchChunks,
       });
-      const embedding = data[0];
 
-      // Save to D1
-      await c.env.DB.prepare(
-        'INSERT INTO documents (id, text_content, source_url) VALUES (?, ?, ?)'
-      ).bind(id, chunk, sourceUrl).run();
+      // 2. Batch insert all chunks into D1 database
+      const d1Statements = batchChunks.map((chunk, idx) =>
+        c.env.DB.prepare(
+          'INSERT INTO documents (id, text_content, source_url) VALUES (?, ?, ?)'
+        ).bind(batchIds[idx], chunk, sourceUrl)
+      );
+      await c.env.DB.batch(d1Statements);
 
-      // Save to Vectorize
-      await c.env.VECTORIZE.upsert([
-        {
-          id: id,
-          values: embedding,
-        }
-      ]);
+      // 3. Batch upsert all vectors into Vectorize
+      const vectorizePayload = batchIds.map((id, idx) => ({
+        id,
+        values: data[idx],
+      }));
+      await c.env.VECTORIZE.upsert(vectorizePayload);
 
-      insertedIds.push(id);
+      insertedIds.push(...batchIds);
     }
 
     return c.json({ 
@@ -192,6 +407,22 @@ app.post('/ingest', async (c) => {
 
 app.post('/chat', async (c) => {
   try {
+    if (!c.env.VECTORIZE) {
+      return c.json(
+        {
+          error:
+            'VECTORIZE binding is undefined. Jalankan server lokal dengan mode remote menggunakan: `npm run dev` (atau `wrangler dev --remote`) agar Vectorize terikat ke Cloudflare.',
+        },
+        500
+      );
+    }
+    if (!c.env.DB) {
+      return c.json({ error: 'DB (D1) binding is undefined.' }, 500);
+    }
+    if (!c.env.AI) {
+      return c.json({ error: 'AI (Workers AI) binding is undefined.' }, 500);
+    }
+
     const body = await c.req.json();
     const question = body.question;
 
@@ -200,7 +431,7 @@ app.post('/chat', async (c) => {
     }
 
     // 1. Generate embedding for the question
-    const { data } = await c.env.AI.run('@cf/baai/bge-base-en-v1.5', {
+    const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
       text: [question]
     });
     const questionEmbedding = data[0];
@@ -220,12 +451,12 @@ app.post('/chat', async (c) => {
       `SELECT text_content FROM documents WHERE id IN (${placeholders})`
     ).bind(...matchIds).all();
 
-    const context = results.map((r: any) => r.text_content).join('\\n\\n');
+    const context = results.map((r: any) => r.text_content).join('\n\n');
 
     // 4. Generate answer using LLM
     const systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question. If you cannot answer the question based on the context, say "I don't know based on the provided documents."\n\nContext:\n${context}`;
     
-    const response = await c.env.AI.run('@cf/meta/llama-3-8b-instruct', {
+    const response = await c.env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: question }

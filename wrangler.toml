@@ -1,4 +1,5 @@
 name = "cabe-chatbot"
+main = "src/index.ts"
 compatibility_date = "2024-03-20"
 
 [ai]
@@ -7,7 +8,8 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "cabe-chatbot-db"
-database_id = "default" # This will be replaced when actually creating the DB
+database_id = "a9b0c20b-9505-482d-82c5-6e7f7051f468"
+migrations_dir = "migrations"
 
 [[vectorize]]
 binding = "VECTORIZE"

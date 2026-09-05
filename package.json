@@ -2,10 +2,14 @@
   "name": "cabe-chatbot",
   "version": "1.0.0",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "dev": "wrangler dev --experimental-vectorize-bind-to-prod",
+    "dev:remote": "wrangler dev --remote",
+    "deploy": "wrangler deploy",
+    "d1:migrate:local": "wrangler d1 migrations apply cabe-chatbot-db --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply cabe-chatbot-db --remote"
   },
   "dependencies": {
+    "@scalar/hono-api-reference": "^0.12.0",
     "hono": "^4.1.0"
   },
   "devDependencies": {
