@@ -1,14 +1,30 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { apiReference } from '@scalar/hono-api-reference';
+import {
+  requireAuth,
+  getAuthUser,
+  hashPassword,
+  verifyPassword,
+  signSession,
+  buildSessionCookie,
+  buildLogoutCookie,
+} from './auth';
+import { registerUiRoutes } from './ui';
 
 type Bindings = {
   DB: D1Database;
   VECTORIZE: VectorizeIndex;
   AI: any;
+  AUTH_SECRET: string;
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{
+  Bindings: Bindings;
+  Variables: { user: { id: string; email: string; name: string | null } };
+}>();
+
+const authGuard = requireAuth() as any;
 
 // Enable CORS for testing from browser / Scalar UI
 app.use('*', cors());
@@ -52,7 +68,8 @@ const baseOpenApiSpec = {
       post: {
         summary: 'Ingest Document (HTML atau URL)',
         description:
-          'Menerima dokumen HTML atau URL halaman web, mengekstrak konten teks bernilai, memecahnya menjadi potongan teks (*chunks*), membuat vektor embedding dengan Workers AI (`@cf/baai/bge-m3`), serta menyimpannya ke D1 Database dan Vectorize.',
+          'Menerima dokumen HTML atau URL halaman web, mengekstrak konten teks bernilai, memecahnya menjadi potongan teks (*chunks*), membuat vektor embedding dengan Workers AI (`@cf/baai/bge-m3`), serta menyimpannya ke D1 Database dan Vectorize milik user yang sedang login. **Butuh login (cookie session).**',
+        security: [{ cookieAuth: [] }],
         requestBody: {
           required: true,
           content: {
@@ -129,7 +146,8 @@ const baseOpenApiSpec = {
       post: {
         summary: 'Tanya Dokumen (Chat RAG)',
         description:
-          'Menerima pertanyaan user, membuat embedding dari pertanyaan, melakukan similarity search di Vectorize Index, mengambil potongan dokumen teks asli dari D1 Database, dan menghasilkan jawaban cerdas menggunakan LLM `@cf/meta/llama-3.2-3b-instruct`.',
+          'Menerima pertanyaan user, membuat embedding dari pertanyaan, melakukan similarity search di Vectorize Index, mengambil potongan dokumen teks asli dari D1 Database, dan menghasilkan jawaban cerdas menggunakan LLM `@cf/meta/llama-3.2-3b-instruct`. **Butuh login (cookie session).**',
+        security: [{ cookieAuth: [] }],
         requestBody: {
           required: true,
           content: {
@@ -199,6 +217,136 @@ const baseOpenApiSpec = {
         },
       },
     },
+    '/api/auth/register': {
+      post: {
+        summary: 'Registrasi akun baru',
+        description: 'Membuat akun baru dengan email & password. Otomatis login (set cookie session).',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['email', 'password'],
+                properties: {
+                  email: { type: 'string', format: 'email', example: 'budi@contoh.com' },
+                  password: { type: 'string', minLength: 8, example: 'rahasia123' },
+                  name: { type: 'string', example: 'Budi', description: 'Opsional.' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Registrasi berhasil.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    user: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'string' },
+                        email: { type: 'string' },
+                        name: { type: 'string', nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'Email/password tidak valid atau email sudah terdaftar.' },
+        },
+      },
+    },
+    '/api/auth/login': {
+      post: {
+        summary: 'Login',
+        description: 'Login dengan email & password. Set cookie session HttpOnly.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['email', 'password'],
+                properties: {
+                  email: { type: 'string', format: 'email' },
+                  password: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Login berhasil.' },
+          '401': { description: 'Email atau password salah.' },
+        },
+      },
+    },
+    '/api/auth/logout': {
+      post: {
+        summary: 'Logout',
+        description: 'Menghapus cookie session.',
+        responses: { '200': { description: 'Logout berhasil.' } },
+      },
+    },
+    '/api/auth/me': {
+      get: {
+        summary: 'Profil user saat ini',
+        description: 'Mengembalikan user yang sedang login berdasarkan cookie session.',
+        security: [{ cookieAuth: [] }],
+        responses: {
+          '200': { description: 'Data user.' },
+          '401': { description: 'Belum login.' },
+        },
+      },
+    },
+    '/api/documents': {
+      get: {
+        summary: 'Daftar dokumen milik user',
+        description: 'Mengembalikan semua chunk dokumen milik user yang sedang login.',
+        security: [{ cookieAuth: [] }],
+        responses: {
+          '200': { description: 'Daftar dokumen.' },
+          '401': { description: 'Belum login.' },
+        },
+      },
+    },
+    '/api/documents/{id}': {
+      delete: {
+        summary: 'Hapus dokumen milik user',
+        description: 'Menghapus chunk dokumen (D1 + Vectorize) hanya jika milik user yang sedang login.',
+        security: [{ cookieAuth: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string' },
+            description: 'ID dokumen.',
+          },
+        ],
+        responses: {
+          '200': { description: 'Dokumen dihapus.' },
+          '404': { description: 'Dokumen tidak ditemukan atau bukan milik Anda.' },
+        },
+      },
+    },
+  },
+  components: {
+    securitySchemes: {
+      cookieAuth: {
+        type: 'apiKey',
+        in: 'cookie',
+        name: 'session',
+        description: 'Cookie session HttpOnly yang di-set saat login/register.',
+      },
+    },
   },
 };
 
@@ -223,8 +371,149 @@ app.get(
   })
 );
 
-// Redirect root / ke /reference untuk kemudahan akses
-app.get('/', (c) => c.redirect('/reference'));
+// --------------------------------------------------------------------
+// Routes autentikasi
+// --------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+app.post('/api/auth/register', async (c) => {
+  try {
+    const body = await c.req.json();
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = String(body.password || '');
+    const name = body.name ? String(body.name).trim() || null : null;
+
+    if (!email || !EMAIL_RE.test(email)) {
+      return c.json({ error: 'Email tidak valid' }, 400);
+    }
+    if (password.length < 8) {
+      return c.json({ error: 'Password minimal 8 karakter' }, 400);
+    }
+
+    const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
+      .bind(email)
+      .first();
+    if (existing) {
+      return c.json({ error: 'Email sudah terdaftar' }, 400);
+    }
+
+    const id = crypto.randomUUID();
+    const { passwordHash, salt } = await hashPassword(password);
+
+    await c.env.DB.prepare(
+      'INSERT INTO users (id, email, password_hash, salt, name) VALUES (?, ?, ?, ?, ?)'
+    )
+      .bind(id, email, passwordHash, salt, name)
+      .run();
+
+    const secret = c.env.AUTH_SECRET || 'dev-secret-change-me';
+    const token = await signSession(id, secret);
+    const isSecure = new URL(c.req.url).protocol === 'https:';
+
+    c.header('Set-Cookie', buildSessionCookie(token, isSecure));
+    return c.json({ success: true, user: { id, email, name } });
+  } catch (error: any) {
+    console.error('Register error:', error);
+    return c.json({ error: error.message || 'Gagal registrasi' }, 500);
+  }
+});
+
+app.post('/api/auth/login', async (c) => {
+  try {
+    const body = await c.req.json();
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = String(body.password || '');
+
+    if (!email || !password) {
+      return c.json({ error: 'Email dan password wajib diisi' }, 400);
+    }
+
+    const row = await c.env.DB.prepare(
+      'SELECT id, email, name, password_hash, salt FROM users WHERE email = ?'
+    )
+      .bind(email)
+      .first<{ id: string; email: string; name: string | null; password_hash: string; salt: string }>();
+
+    if (!row) {
+      return c.json({ error: 'Email atau password salah' }, 401);
+    }
+
+    const valid = await verifyPassword(password, row.salt, row.password_hash);
+    if (!valid) {
+      return c.json({ error: 'Email atau password salah' }, 401);
+    }
+
+    const secret = c.env.AUTH_SECRET || 'dev-secret-change-me';
+    const token = await signSession(row.id, secret);
+    const isSecure = new URL(c.req.url).protocol === 'https:';
+
+    c.header('Set-Cookie', buildSessionCookie(token, isSecure));
+    return c.json({ success: true, user: { id: row.id, email: row.email, name: row.name ?? null } });
+  } catch (error: any) {
+    console.error('Login error:', error);
+    return c.json({ error: error.message || 'Gagal login' }, 500);
+  }
+});
+
+app.post('/api/auth/logout', (c) => {
+  const isSecure = new URL(c.req.url).protocol === 'https:';
+  c.header('Set-Cookie', buildLogoutCookie(isSecure));
+  return c.json({ success: true });
+});
+
+app.get('/api/auth/me', async (c) => {
+  const user = await getAuthUser(c);
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  return c.json({ user });
+});
+
+// --------------------------------------------------------------------
+// Routes dokumen milik user
+// --------------------------------------------------------------------
+
+app.get('/api/documents', authGuard, async (c) => {
+  const user = c.get('user');
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, source_url, substr(text_content, 1, 200) AS preview, length(text_content) AS size, created_at
+     FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 500`
+  )
+    .bind(user.id)
+    .all();
+  return c.json({ documents: results });
+});
+
+app.delete('/api/documents/:id', authGuard, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+
+  const row = await c.env.DB.prepare('SELECT id FROM documents WHERE id = ? AND user_id = ?')
+    .bind(id, user.id)
+    .first();
+  if (!row) {
+    return c.json({ error: 'Dokumen tidak ditemukan atau bukan milik Anda' }, 404);
+  }
+
+  await c.env.DB.prepare('DELETE FROM documents WHERE id = ? AND user_id = ?')
+    .bind(id, user.id)
+    .run();
+
+  try {
+    await c.env.VECTORIZE.deleteByIds([id]);
+  } catch (e) {
+    console.error('Vectorize delete error (best-effort):', e);
+  }
+
+  return c.json({ success: true });
+});
+
+// --------------------------------------------------------------------
+// UI (landing, login, signup, dashboard)
+// --------------------------------------------------------------------
+
+registerUiRoutes(app as any);
 
 // Decode common HTML entities
 function decodeHtmlEntities(text: string): string {
@@ -334,8 +623,9 @@ function chunkText(text: string, maxLength: number = 1000): string[] {
   return chunks;
 }
 
-app.post('/ingest', async (c) => {
+app.post('/ingest', authGuard, async (c) => {
   try {
+    const user = c.get('user');
     if (!c.env.VECTORIZE) {
       return c.json(
         {
@@ -399,11 +689,11 @@ app.post('/ingest', async (c) => {
         text: batchChunks,
       });
 
-      // 2. Batch insert all chunks into D1 database
+      // 2. Batch insert all chunks into D1 database (owned by user)
       const d1Statements = batchChunks.map((chunk, idx) =>
         c.env.DB.prepare(
-          'INSERT INTO documents (id, text_content, source_url) VALUES (?, ?, ?)'
-        ).bind(batchIds[idx], chunk, sourceUrl)
+          'INSERT INTO documents (id, text_content, source_url, user_id) VALUES (?, ?, ?, ?)'
+        ).bind(batchIds[idx], chunk, sourceUrl, user.id)
       );
       await c.env.DB.batch(d1Statements);
 
@@ -428,8 +718,9 @@ app.post('/ingest', async (c) => {
   }
 });
 
-app.post('/chat', async (c) => {
+app.post('/chat', authGuard, async (c) => {
   try {
+    const user = c.get('user');
     if (!c.env.VECTORIZE) {
       return c.json(
         {
@@ -459,20 +750,21 @@ app.post('/chat', async (c) => {
     });
     const questionEmbedding = data[0];
 
-    // 2. Query Vectorize for top matches
+    // 2. Query Vectorize for top matches (isolation is enforced by the user_id
+    // filter on the D1 context query below)
     const vectorizeResults = await c.env.VECTORIZE.query(questionEmbedding, { topK: 3 });
 
     if (vectorizeResults.matches.length === 0) {
       return c.json({ answer: "I couldn't find any relevant information to answer your question." });
     }
 
-    // 3. Retrieve text context from D1
+    // 3. Retrieve text context from D1 (only chunks owned by this user)
     const matchIds = vectorizeResults.matches.map(m => m.id);
     const placeholders = matchIds.map(() => '?').join(',');
     
     const { results } = await c.env.DB.prepare(
-      `SELECT text_content FROM documents WHERE id IN (${placeholders})`
-    ).bind(...matchIds).all();
+      `SELECT text_content FROM documents WHERE id IN (${placeholders}) AND user_id = ?`
+    ).bind(...matchIds, user.id).all();
 
     const context = results.map((r: any) => r.text_content).join('\n\n');
 

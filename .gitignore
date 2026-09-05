@@ -9,3 +9,4 @@ dist/
 # Optional: Ignore temporary AI/IDE folders if you don't want to track them
 .claude/
 .agents
+.jcode/tmp/

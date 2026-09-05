@@ -1,3 +1,4 @@
+-- Migration number: 0002 	 2026-09-05T15:00:00.000Z
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
@@ -6,15 +7,6 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-
-CREATE TABLE IF NOT EXISTS documents (
-  id TEXT PRIMARY KEY,
-  text_content TEXT NOT NULL,
-  source_url TEXT,
-  user_id TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
+ALTER TABLE documents ADD COLUMN user_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id);
