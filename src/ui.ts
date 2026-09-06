@@ -1023,11 +1023,13 @@ ${BASE_CSS}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: question })
     }).then(function(r) {
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
+      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
+        return { ok: false, status: r.status, data: { error: 'Respon server tidak valid (' + r.status + ')' } };
+      });
     }).then(function(res) {
       btn.disabled = false;
       if (!res.ok || (res.data && res.data.error)) {
-        chatErrorEl.textContent = (res.data && res.data.error) || 'Gagal memproses pertanyaan.';
+        chatErrorEl.textContent = (res.data && res.data.error) || ('Gagal memproses pertanyaan (Status ' + res.status + ').');
         return;
       }
       chatHistory.push({
@@ -1038,9 +1040,9 @@ ${BASE_CSS}
       qEl.value = '';
       renderChat();
       loadUserData(); // refresh daily chats quota counter
-    }).catch(function() {
+    }).catch(function(err) {
       btn.disabled = false;
-      chatErrorEl.textContent = 'Gagal mengirim pertanyaan ke server.';
+      chatErrorEl.textContent = 'Gagal mengirim pertanyaan: ' + (err && err.message ? err.message : String(err));
     });
   });
 
