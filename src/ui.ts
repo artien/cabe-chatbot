@@ -928,13 +928,18 @@ ${BASE_CSS}
   function loadDocs() {
     fetch('/api/documents').then(function(r) {
       if (r.status === 401) { gotoLogin(); return null; }
-      return r.json();
-    }).then(function(data) {
-      if (!data) return;
-      var docs = (data && data.documents) || [];
+      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
+    }).then(function(res) {
+      if (!res) return;
+      if (!res.ok) {
+        var errMsg = (res.data && res.data.error) || 'Gagal memuat daftar dokumen.';
+        docsListEl.innerHTML = '<p class="error-box">' + escapeHtml(errMsg) + '</p>';
+        return;
+      }
+      var docs = (res.data && res.data.documents) || [];
       docsCountEl.textContent = '(' + docs.length + ')';
       if (docs.length === 0) {
-        docsListEl.innerHTML = '<p class="muted">Belum ada dokumen yang di-ingest.</p>';
+        docsListEl.innerHTML = '<p class="muted">Belum ada dokumen yang di-ingest. Silakan ingest URL atau HTML di sebelah kiri.</p>';
         return;
       }
       var html = '';
@@ -957,7 +962,7 @@ ${BASE_CSS}
       }
       docsListEl.innerHTML = html;
     }).catch(function() {
-      docsListEl.innerHTML = '<p class="error-box">Gagal memuat daftar dokumen.</p>';
+      docsListEl.innerHTML = '<p class="error-box">Gagal terhubung ke server untuk memuat daftar dokumen.</p>';
     });
   }
 

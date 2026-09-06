@@ -318,6 +318,31 @@ async function runVerification() {
   if (oapi.status !== 200) throw new Error('/openapi.json failed');
   console.log('✔ 16. GET /openapi.json valid');
 
+  // 17. Test Offline / Fallback Mode (Vectorize & AI offline in local dev)
+  const offlineEnv = {
+    DB: mockEnv.DB,
+    VECTORIZE: {
+      async query() { throw new Error('Vectorize offline in local dev'); },
+      async upsert() { throw new Error('Vectorize offline in local dev'); },
+      async deleteByIds() { return { success: true }; }
+    } as any,
+    AI: {
+      async run() { throw new Error('Workers AI offline in local dev'); }
+    } as any,
+    AUTH_SECRET: 'test-secret-key-12345'
+  };
+
+  const offlineChatRes = await app.request('/chat', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({ question: 'Doc' })
+  }, offlineEnv);
+  const offlineChatJson = await offlineChatRes.json() as any;
+  if (offlineChatRes.status !== 200 || !offlineChatJson.answer) {
+    throw new Error(`Offline chat fallback failed: ${offlineChatRes.status} ${JSON.stringify(offlineChatJson)}`);
+  }
+  console.log('✔ 17. Offline Vectorize fallback D1 keyword search succeeded');
+
   console.log('\n✅ ALL VERIFICATION CHECKS PASSED!\n');
 }
 

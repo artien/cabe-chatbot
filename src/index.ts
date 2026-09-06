@@ -877,19 +877,133 @@ app.post('/api/widget/regenerate-key', authGuard, async (c) => {
 });
 
 // --------------------------------------------------------------------
+// Helper RAG Query (Hybrid Vector + D1 Search Fallback for Local Dev)
+// --------------------------------------------------------------------
+
+async function executeRagQuery(
+  env: Bindings,
+  userId: string,
+  question: string
+): Promise<{ answer: string; context_used: number }> {
+  // 1. Try Vector search with Workers AI + Vectorize
+  let matchIds: string[] = [];
+  if (env.AI && env.VECTORIZE) {
+    try {
+      const { data } = await env.AI.run('@cf/baai/bge-m3', {
+        text: [question],
+      });
+      const questionEmbedding = data?.[0];
+      if (questionEmbedding) {
+        const vectorizeResults = await env.VECTORIZE.query(questionEmbedding, { topK: 3 });
+        if (vectorizeResults && Array.isArray(vectorizeResults.matches)) {
+          matchIds = vectorizeResults.matches.map((m: any) => m.id).filter(Boolean);
+        }
+      }
+    } catch (vErr) {
+      console.warn('Vectorize search warning (falling back to D1 search):', vErr);
+    }
+  }
+
+  // 2. Retrieve text context from D1 matching matchIds
+  let results: { text_content: string }[] = [];
+  if (matchIds.length > 0) {
+    const placeholders = matchIds.map(() => '?').join(',');
+    try {
+      const dbRes = await env.DB.prepare(
+        `SELECT text_content FROM documents WHERE id IN (${placeholders}) AND user_id = ?`
+      )
+        .bind(...matchIds, userId)
+        .all<{ text_content: string }>();
+      results = dbRes.results || [];
+    } catch (dbErr) {
+      console.warn('D1 context fetch by IDs error:', dbErr);
+    }
+  }
+
+  // 3. Fallback to D1 keyword search or recent documents if Vectorize had no results or failed locally
+  if (results.length === 0 && env.DB) {
+    const keywords = question
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-zA-Z0-9\u00C0-\u024F]/g, '').trim())
+      .filter((w) => w.length > 2)
+      .slice(0, 4);
+
+    if (keywords.length > 0) {
+      try {
+        const likeClauses = keywords.map(() => 'text_content LIKE ?').join(' OR ');
+        const binds = [userId, ...keywords.map((k) => `%${k}%`)];
+        const kwRes = await env.DB.prepare(
+          `SELECT text_content FROM documents WHERE user_id = ? AND (${likeClauses}) ORDER BY created_at DESC LIMIT 3`
+        )
+          .bind(...binds)
+          .all<{ text_content: string }>();
+        results = kwRes.results || [];
+      } catch (kwErr) {
+        console.warn('D1 keyword search error:', kwErr);
+      }
+    }
+
+    if (results.length === 0) {
+      try {
+        const recentRes = await env.DB.prepare(
+          'SELECT text_content FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 3'
+        )
+          .bind(userId)
+          .all<{ text_content: string }>();
+        results = recentRes.results || [];
+      } catch (recErr) {
+        console.warn('D1 recent docs fallback error:', recErr);
+      }
+    }
+  }
+
+  if (results.length === 0) {
+    return {
+      answer:
+        'Saya belum menemukan dokumen atau informasi yang relevan untuk menjawab pertanyaan ini. Silakan tambahkan dokumen melalui menu Ingest terlebih dahulu.',
+      context_used: 0,
+    };
+  }
+
+  const context = results.map((r) => r.text_content).join('\n\n');
+
+  // 4. Generate response using Workers AI LLM
+  if (env.AI) {
+    try {
+      const systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question accurately in Indonesian. If you cannot answer based on the context, say "Saya tidak menemukan informasi tersebut di dokumen yang tersedia."\n\nContext:\n${context}`;
+      const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: question },
+        ],
+      });
+      return {
+        answer: response?.response || 'Tidak ada respon yang dihasilkan dari AI.',
+        context_used: results.length,
+      };
+    } catch (llmErr) {
+      console.warn('Workers AI LLM generation warning (fallback response):', llmErr);
+      return {
+        answer: `Berdasarkan dokumen: ${context.slice(0, 300)}...`,
+        context_used: results.length,
+      };
+    }
+  }
+
+  return {
+    answer: `Berdasarkan dokumen: ${context.slice(0, 300)}...`,
+    context_used: results.length,
+  };
+}
+
+// --------------------------------------------------------------------
 // Public Embeddable Widget API
 // --------------------------------------------------------------------
 
 app.post('/api/widget/chat', async (c) => {
   try {
-    if (!c.env.VECTORIZE) {
-      return c.json({ error: 'VECTORIZE binding is undefined.' }, 500);
-    }
     if (!c.env.DB) {
       return c.json({ error: 'DB (D1) binding is undefined.' }, 500);
-    }
-    if (!c.env.AI) {
-      return c.json({ error: 'AI (Workers AI) binding is undefined.' }, 500);
     }
 
     const body = await c.req.json();
@@ -933,13 +1047,18 @@ app.post('/api/widget/chat', async (c) => {
 
     // Check daily chat limit for owner (100 chats/day)
     const today = new Date().toISOString().slice(0, 10);
-    const usageRow = await c.env.DB.prepare(
-      'SELECT count FROM daily_chat_usage WHERE user_id = ? AND usage_date = ?'
-    )
-      .bind(owner.id, today)
-      .first<{ count: number }>();
+    let ownerChats = 0;
+    try {
+      const usageRow = await c.env.DB.prepare(
+        'SELECT count FROM daily_chat_usage WHERE user_id = ? AND usage_date = ?'
+      )
+        .bind(owner.id, today)
+        .first<{ count: number }>();
+      ownerChats = usageRow?.count ?? 0;
+    } catch {
+      ownerChats = 0;
+    }
 
-    const ownerChats = usageRow?.count ?? 0;
     if (ownerChats >= PLAN_LIMITS.pro.maxDailyChats) {
       return c.json(
         { error: 'Batas chat harian pemilik widget telah tercapai (100 pesan/hari).' },
@@ -947,16 +1066,11 @@ app.post('/api/widget/chat', async (c) => {
       );
     }
 
-    // 1. Generate embedding for the question
-    const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
-      text: [question],
-    });
-    const questionEmbedding = data[0];
+    // Execute RAG Query
+    const ragResult = await executeRagQuery(c.env, owner.id, question);
 
-    // 2. Query Vectorize
-    const vectorizeResults = await c.env.VECTORIZE.query(questionEmbedding, { topK: 3 });
-
-    if (vectorizeResults.matches.length === 0) {
+    // Track daily usage
+    try {
       await c.env.DB.prepare(
         `INSERT INTO daily_chat_usage (id, user_id, usage_date, count)
          VALUES (?, ?, ?, 1)
@@ -964,47 +1078,13 @@ app.post('/api/widget/chat', async (c) => {
       )
         .bind(crypto.randomUUID(), owner.id, today)
         .run();
-
-      return c.json({
-        answer: "I couldn't find any relevant information to answer your question.",
-        context_used: 0,
-      });
+    } catch (uErr) {
+      console.warn('Track daily usage warning:', uErr);
     }
 
-    // 3. Retrieve text context from D1 matching owner.id
-    const matchIds = vectorizeResults.matches.map((m: any) => m.id);
-    const placeholders = matchIds.map(() => '?').join(',');
-
-    const { results } = await c.env.DB.prepare(
-      `SELECT text_content FROM documents WHERE id IN (${placeholders}) AND user_id = ?`
-    )
-      .bind(...matchIds, owner.id)
-      .all();
-
-    const context = (results || []).map((r: any) => r.text_content).join('\n\n');
-
-    // 4. Generate answer using LLM
-    const systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question. If you cannot answer the question based on the context, say "I don't know based on the provided documents."\n\nContext:\n${context}`;
-
-    const response = await c.env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: question },
-      ],
-    });
-
-    // 5. Increment daily chat usage for owner
-    await c.env.DB.prepare(
-      `INSERT INTO daily_chat_usage (id, user_id, usage_date, count)
-       VALUES (?, ?, ?, 1)
-       ON CONFLICT(user_id, usage_date) DO UPDATE SET count = count + 1`
-    )
-      .bind(crypto.randomUUID(), owner.id, today)
-      .run();
-
     return c.json({
-      answer: response.response,
-      context_used: results ? results.length : 0,
+      answer: ragResult.answer,
+      context_used: ragResult.context_used,
     });
   } catch (error: any) {
     console.error('Widget chat error:', error);
@@ -1017,60 +1097,82 @@ app.post('/api/widget/chat', async (c) => {
 // --------------------------------------------------------------------
 
 app.get('/api/documents', authGuard, async (c) => {
-  const user = c.get('user');
-  const { results } = await c.env.DB.prepare(
-    `SELECT
-       coalesce(doc_id, id) as id,
-       min(source_url) as source_url,
-       substr(min(text_content), 1, 100) as preview,
-       sum(length(text_content)) as size,
-       min(created_at) as created_at,
-       count(*) as chunk_count
-     FROM documents
-     WHERE user_id = ?
-     GROUP BY coalesce(doc_id, id)
-     ORDER BY min(created_at) DESC`
-  )
-    .bind(user.id)
-    .all();
+  try {
+    const user = c.get('user');
+    try {
+      const { results } = await c.env.DB.prepare(
+        `SELECT
+           coalesce(doc_id, id) as id,
+           min(source_url) as source_url,
+           substr(min(text_content), 1, 100) as preview,
+           sum(length(text_content)) as size,
+           min(created_at) as created_at,
+           count(*) as chunk_count
+         FROM documents
+         WHERE user_id = ?
+         GROUP BY coalesce(doc_id, id)
+         ORDER BY min(created_at) DESC`
+      )
+        .bind(user.id)
+        .all();
 
-  return c.json({ documents: results || [] });
+      return c.json({ documents: results || [] });
+    } catch (groupErr) {
+      // Fallback if doc_id column does not exist or GROUP BY fails
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, source_url, substr(text_content, 1, 100) as preview, length(text_content) as size, created_at, 1 as chunk_count
+         FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 500`
+      )
+        .bind(user.id)
+        .all();
+
+      return c.json({ documents: results || [] });
+    }
+  } catch (error: any) {
+    console.error('Fetch documents error:', error);
+    return c.json({ error: error.message || 'Gagal memuat dokumen', documents: [] }, 500);
+  }
 });
 
 app.delete('/api/documents/:id', authGuard, async (c) => {
-  const user = c.get('user');
-  const id = c.req.param('id');
+  try {
+    const user = c.get('user');
+    const id = c.req.param('id');
 
-  // 1. Get all matching chunk IDs to delete from Vectorize
-  const { results } = await c.env.DB.prepare(
-    'SELECT id FROM documents WHERE (id = ? OR doc_id = ?) AND user_id = ?'
-  )
-    .bind(id, id, user.id)
-    .all();
+    // 1. Get all matching chunk IDs to delete from Vectorize
+    const { results } = await c.env.DB.prepare(
+      'SELECT id FROM documents WHERE (id = ? OR doc_id = ?) AND user_id = ?'
+    )
+      .bind(id, id, user.id)
+      .all();
 
-  const chunkIds = results ? results.map((r: any) => r.id as string).filter(Boolean) : [];
+    const chunkIds = results ? results.map((r: any) => r.id as string).filter(Boolean) : [];
 
-  if (chunkIds.length === 0) {
-    return c.json({ error: 'Dokumen tidak ditemukan atau bukan milik Anda' }, 404);
-  }
-
-  // 2. Delete from D1
-  await c.env.DB.prepare(
-    'DELETE FROM documents WHERE (id = ? OR doc_id = ?) AND user_id = ?'
-  )
-    .bind(id, id, user.id)
-    .run();
-
-  // 3. Delete from Vectorize
-  if (c.env.VECTORIZE) {
-    try {
-      await c.env.VECTORIZE.deleteByIds(chunkIds);
-    } catch (e) {
-      console.error('Vectorize delete error (best-effort):', e);
+    if (chunkIds.length === 0) {
+      return c.json({ error: 'Dokumen tidak ditemukan atau bukan milik Anda' }, 404);
     }
-  }
 
-  return c.json({ success: true, deleted_chunks: chunkIds.length });
+    // 2. Delete from D1
+    await c.env.DB.prepare(
+      'DELETE FROM documents WHERE (id = ? OR doc_id = ?) AND user_id = ?'
+    )
+      .bind(id, id, user.id)
+      .run();
+
+    // 3. Delete from Vectorize
+    if (c.env.VECTORIZE) {
+      try {
+        await c.env.VECTORIZE.deleteByIds(chunkIds);
+      } catch (e) {
+        console.error('Vectorize delete error (best-effort):', e);
+      }
+    }
+
+    return c.json({ success: true, deleted_chunks: chunkIds.length });
+  } catch (error: any) {
+    console.error('Delete document error:', error);
+    return c.json({ error: error.message || 'Gagal menghapus dokumen' }, 500);
+  }
 });
 
 // --------------------------------------------------------------------
@@ -1171,32 +1273,34 @@ function chunkText(text: string, chunkSize = 500, overlap = 50): string[] {
 app.post('/ingest', authGuard, async (c) => {
   try {
     const user = c.get('user');
-    if (!c.env.VECTORIZE) {
-      return c.json(
-        {
-          error:
-            'VECTORIZE binding is undefined. Jalankan server lokal dengan mode remote menggunakan: `npm run dev` (atau `wrangler dev --remote`) agar Vectorize terikat ke Cloudflare.',
-        },
-        500
-      );
-    }
     if (!c.env.DB) {
       return c.json({ error: 'DB (D1) binding is undefined.' }, 500);
-    }
-    if (!c.env.AI) {
-      return c.json({ error: 'AI (Workers AI) binding is undefined.' }, 500);
     }
 
     const plan = user.plan === 'pro' ? 'pro' : 'free';
     const maxDocs = PLAN_LIMITS[plan].maxDocs;
 
-    const docCountRow = await c.env.DB.prepare(
-      'SELECT COUNT(DISTINCT coalesce(doc_id, id)) as total FROM documents WHERE user_id = ?'
-    )
-      .bind(user.id)
-      .first<{ total: number }>();
+    let currentDocs = 0;
+    try {
+      const docCountRow = await c.env.DB.prepare(
+        'SELECT COUNT(DISTINCT coalesce(doc_id, id)) as total FROM documents WHERE user_id = ?'
+      )
+        .bind(user.id)
+        .first<{ total: number }>();
+      currentDocs = docCountRow?.total ?? 0;
+    } catch {
+      try {
+        const fallbackCount = await c.env.DB.prepare(
+          'SELECT COUNT(*) as total FROM documents WHERE user_id = ?'
+        )
+          .bind(user.id)
+          .first<{ total: number }>();
+        currentDocs = fallbackCount?.total ?? 0;
+      } catch {
+        currentDocs = 0;
+      }
+    }
 
-    const currentDocs = docCountRow?.total ?? 0;
     if (currentDocs >= maxDocs) {
       return c.json(
         {
@@ -1257,12 +1361,7 @@ app.post('/ingest', authGuard, async (c) => {
       const batchChunks = chunks.slice(i, i + BATCH_SIZE);
       const batchIds = batchChunks.map(() => crypto.randomUUID());
 
-      // 1. Generate embeddings using Workers AI
-      const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
-        text: batchChunks,
-      });
-
-      // 2. Insert text into D1
+      // 1. Insert text into D1 first (ensuring documents are always stored)
       const statements = batchChunks.map((chunkText, idx) => {
         return c.env.DB.prepare(
           'INSERT INTO documents (id, doc_id, text_content, source_url, user_id) VALUES (?, ?, ?, ?, ?)'
@@ -1270,12 +1369,23 @@ app.post('/ingest', authGuard, async (c) => {
       });
       await c.env.DB.batch(statements);
 
-      // 3. Batch upsert all vectors into Vectorize
-      const vectorizePayload = batchIds.map((id, idx) => ({
-        id,
-        values: data[idx],
-      }));
-      await c.env.VECTORIZE.upsert(vectorizePayload);
+      // 2. Generate embeddings using Workers AI & upsert to Vectorize (best effort for local dev)
+      if (c.env.AI && c.env.VECTORIZE) {
+        try {
+          const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
+            text: batchChunks,
+          });
+          if (data && data.length === batchChunks.length) {
+            const vectorizePayload = batchIds.map((id, idx) => ({
+              id,
+              values: data[idx],
+            }));
+            await c.env.VECTORIZE.upsert(vectorizePayload);
+          }
+        } catch (vErr) {
+          console.warn('Vectorize / AI embedding warning during ingest:', vErr);
+        }
+      }
 
       insertedIds.push(...batchIds);
     }
@@ -1295,20 +1405,8 @@ app.post('/ingest', authGuard, async (c) => {
 app.post('/chat', authGuard, async (c) => {
   try {
     const user = c.get('user');
-    if (!c.env.VECTORIZE) {
-      return c.json(
-        {
-          error:
-            'VECTORIZE binding is undefined. Jalankan server lokal dengan mode remote menggunakan: `npm run dev` (atau `wrangler dev --remote`) agar Vectorize terikat ke Cloudflare.',
-        },
-        500
-      );
-    }
     if (!c.env.DB) {
       return c.json({ error: 'DB (D1) binding is undefined.' }, 500);
-    }
-    if (!c.env.AI) {
-      return c.json({ error: 'AI (Workers AI) binding is undefined.' }, 500);
     }
 
     // Check daily chat limit
@@ -1316,13 +1414,18 @@ app.post('/chat', authGuard, async (c) => {
     const maxDailyChats = PLAN_LIMITS[plan].maxDailyChats;
     const today = new Date().toISOString().slice(0, 10);
 
-    const usageRow = await c.env.DB.prepare(
-      'SELECT count FROM daily_chat_usage WHERE user_id = ? AND usage_date = ?'
-    )
-      .bind(user.id, today)
-      .first<{ count: number }>();
+    let currentChats = 0;
+    try {
+      const usageRow = await c.env.DB.prepare(
+        'SELECT count FROM daily_chat_usage WHERE user_id = ? AND usage_date = ?'
+      )
+        .bind(user.id, today)
+        .first<{ count: number }>();
+      currentChats = usageRow?.count ?? 0;
+    } catch {
+      currentChats = 0;
+    }
 
-    const currentChats = usageRow?.count ?? 0;
     if (currentChats >= maxDailyChats) {
       return c.json(
         {
@@ -1333,22 +1436,17 @@ app.post('/chat', authGuard, async (c) => {
     }
 
     const body = await c.req.json();
-    const question = body.question;
+    const question = String(body.question || body.message || '').trim();
 
     if (!question) {
       return c.json({ error: 'Missing question field in request body' }, 400);
     }
 
-    // 1. Generate embedding for the question
-    const { data } = await c.env.AI.run('@cf/baai/bge-m3', {
-      text: [question],
-    });
-    const questionEmbedding = data[0];
+    // Execute RAG Query
+    const ragResult = await executeRagQuery(c.env, user.id, question);
 
-    // 2. Query Vectorize for top matches
-    const vectorizeResults = await c.env.VECTORIZE.query(questionEmbedding, { topK: 3 });
-
-    if (vectorizeResults.matches.length === 0) {
+    // Track daily usage
+    try {
       await c.env.DB.prepare(
         `INSERT INTO daily_chat_usage (id, user_id, usage_date, count)
          VALUES (?, ?, ?, 1)
@@ -1356,47 +1454,13 @@ app.post('/chat', authGuard, async (c) => {
       )
         .bind(crypto.randomUUID(), user.id, today)
         .run();
-
-      return c.json({
-        answer: "I couldn't find any relevant information to answer your question.",
-        context_used: 0,
-      });
+    } catch (uErr) {
+      console.warn('Track daily usage warning:', uErr);
     }
 
-    // 3. Retrieve text context from D1 (only chunks owned by this user)
-    const matchIds = vectorizeResults.matches.map((m: any) => m.id);
-    const placeholders = matchIds.map(() => '?').join(',');
-
-    const { results } = await c.env.DB.prepare(
-      `SELECT text_content FROM documents WHERE id IN (${placeholders}) AND user_id = ?`
-    )
-      .bind(...matchIds, user.id)
-      .all();
-
-    const context = (results || []).map((r: any) => r.text_content).join('\n\n');
-
-    // 4. Generate answer using LLM
-    const systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question. If you cannot answer the question based on the context, say "I don't know based on the provided documents."\n\nContext:\n${context}`;
-
-    const response = await c.env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: question },
-      ],
-    });
-
-    // 5. Increment daily chat usage on successful response
-    await c.env.DB.prepare(
-      `INSERT INTO daily_chat_usage (id, user_id, usage_date, count)
-       VALUES (?, ?, ?, 1)
-       ON CONFLICT(user_id, usage_date) DO UPDATE SET count = count + 1`
-    )
-      .bind(crypto.randomUUID(), user.id, today)
-      .run();
-
     return c.json({
-      answer: response.response,
-      context_used: results ? results.length : 0,
+      answer: ragResult.answer,
+      context_used: ragResult.context_used,
     });
   } catch (error: any) {
     console.error('Chat error:', error);
