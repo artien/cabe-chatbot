@@ -10,6 +10,8 @@ export type AuthUser = {
   id: string;
   email: string;
   name: string | null;
+  plan: 'free' | 'pro';
+  widget_key: string | null;
 };
 
 type SessionPayload = {
@@ -193,6 +195,20 @@ function toHex(base64Url: string): string {
 // Cookie helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Secure cookie flag should only be set for https requests.
+ * Skipped when the host is localhost (even if served over https via a tunnel).
+ */
+export function isSecureRequest(requestUrl: string): boolean {
+  try {
+    const url = new URL(requestUrl);
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return false;
+    return url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function buildSessionCookie(token: string, isHttps: boolean): string {
   const flags = [
     `${SESSION_COOKIE_NAME}=${token}`,
@@ -243,6 +259,10 @@ type EnvWithAuth = {
   };
 };
 
+export function generateWidgetKey(): string {
+  return 'wgt_' + crypto.randomUUID().replace(/-/g, '');
+}
+
 /**
  * Resolve the authenticated user from the request's `session` cookie.
  * Verifies the HMAC signature + expiry, then loads the user from D1.
@@ -262,7 +282,7 @@ export async function getAuthUser(c: {
   if (!payload) return null;
 
   const { results } = await c.env.DB.prepare(
-    'SELECT id, email, name FROM users WHERE id = ?'
+    'SELECT id, email, name, plan, widget_key FROM users WHERE id = ?'
   )
     .bind(payload.uid)
     .all();
@@ -272,10 +292,15 @@ export async function getAuthUser(c: {
     return null;
   }
 
+  const plan: 'free' | 'pro' = row.plan === 'pro' ? 'pro' : 'free';
+  const widget_key = typeof row.widget_key === 'string' ? row.widget_key : null;
+
   return {
     id: row.id,
     email: row.email,
     name: row.name === null || row.name === undefined ? null : String(row.name),
+    plan,
+    widget_key,
   };
 }
 
