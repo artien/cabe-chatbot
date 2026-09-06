@@ -281,13 +281,27 @@ export async function getAuthUser(c: {
   const payload = await verifySession(token, secret);
   if (!payload) return null;
 
-  const { results } = await c.env.DB.prepare(
-    'SELECT id, email, name, plan, widget_key FROM users WHERE id = ?'
-  )
-    .bind(payload.uid)
-    .all();
+  let row: any = null;
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT id, email, name, plan, widget_key FROM users WHERE id = ?'
+    )
+      .bind(payload.uid)
+      .all();
+    row = results && results[0];
+  } catch {
+    try {
+      const { results } = await c.env.DB.prepare(
+        'SELECT id, email, name FROM users WHERE id = ?'
+      )
+        .bind(payload.uid)
+        .all();
+      row = results && results[0];
+    } catch {
+      return null;
+    }
+  }
 
-  const row: any = results && results[0];
   if (!row || typeof row.id !== 'string' || typeof row.email !== 'string') {
     return null;
   }

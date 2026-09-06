@@ -735,14 +735,21 @@ ${BASE_CSS}
   function loadUserData() {
     fetch('/api/user/usage').then(function(r) {
       if (r.status === 401) { gotoLogin(); return null; }
-      return r.json();
-    }).then(function(data) {
-      if (!data || !data.user) return;
-      currentUser = data.user;
-      currentUsage = data;
-      renderUsage();
+      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
+        return { ok: false, status: r.status, data: null };
+      });
+    }).then(function(res) {
+      if (!res) return;
+      if (res.ok && res.data && res.data.user) {
+        currentUser = res.data.user;
+        currentUsage = res.data;
+        renderUsage();
+      }
       loadDocs();
-    }).catch(gotoLogin);
+    }).catch(function(e) {
+      console.warn('loadUserData warning:', e);
+      loadDocs();
+    });
   }
 
   function renderUsage() {
@@ -928,11 +935,13 @@ ${BASE_CSS}
   function loadDocs() {
     fetch('/api/documents').then(function(r) {
       if (r.status === 401) { gotoLogin(); return null; }
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
+      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
+        return { ok: false, status: r.status, data: { error: 'Respon server tidak valid (' + r.status + ')' } };
+      });
     }).then(function(res) {
       if (!res) return;
       if (!res.ok) {
-        var errMsg = (res.data && res.data.error) || 'Gagal memuat daftar dokumen.';
+        var errMsg = (res.data && res.data.error) || 'Gagal memuat daftar dokumen (Status ' + res.status + ').';
         docsListEl.innerHTML = '<p class="error-box">' + escapeHtml(errMsg) + '</p>';
         return;
       }
@@ -961,8 +970,8 @@ ${BASE_CSS}
           + '</div>';
       }
       docsListEl.innerHTML = html;
-    }).catch(function() {
-      docsListEl.innerHTML = '<p class="error-box">Gagal terhubung ke server untuk memuat daftar dokumen.</p>';
+    }).catch(function(err) {
+      docsListEl.innerHTML = '<p class="error-box">Gagal terhubung ke server: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</p>';
     });
   }
 

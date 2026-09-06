@@ -40,7 +40,60 @@ const app = new Hono<{
 
 const authGuard = requireAuth() as any;
 
-// Enable CORS for testing from browser / Scalar UI / widget
+let schemaInitialized = false;
+
+async function ensureDbSchema(db: D1Database): Promise<void> {
+  try {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        name TEXT,
+        plan TEXT NOT NULL DEFAULT 'free',
+        widget_key TEXT UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        doc_id TEXT,
+        text_content TEXT NOT NULL,
+        source_url TEXT,
+        user_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS daily_chat_usage (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        usage_date TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, usage_date)
+      );
+    `);
+  } catch (e) {
+    // Ignore if tables already exist
+  }
+  try { await db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free';"); } catch {}
+  try { await db.exec("ALTER TABLE users ADD COLUMN widget_key TEXT;"); } catch {}
+  try { await db.exec("ALTER TABLE documents ADD COLUMN doc_id TEXT;"); } catch {}
+  try { await db.exec("ALTER TABLE documents ADD COLUMN user_id TEXT;"); } catch {}
+}
+
+// Ensure database schema and enable CORS
+app.use('*', async (c, next) => {
+  if (!schemaInitialized && c.env?.DB && typeof (c.env.DB as any).exec === 'function') {
+    try {
+      await ensureDbSchema(c.env.DB);
+      schemaInitialized = true;
+    } catch (err) {
+      console.warn('Schema ensure error:', err);
+    }
+  }
+  await next();
+});
+
 app.use('*', cors());
 
 // Fungsi pembantu untuk membuat OpenAPI Specification dengan server URL dinamis
