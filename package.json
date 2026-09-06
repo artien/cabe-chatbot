@@ -5,6 +5,8 @@
     "dev": "wrangler dev --experimental-vectorize-bind-to-prod",
     "dev:remote": "wrangler dev --remote",
     "deploy": "wrangler deploy",
+    "test": "npx tsx tests/verify_all.ts",
+    "typecheck": "tsc --noEmit",
     "d1:migrate:local": "wrangler d1 migrations apply cabe-chatbot-db --local",
     "d1:migrate:remote": "wrangler d1 migrations apply cabe-chatbot-db --remote"
   },
