@@ -699,6 +699,29 @@ ${BASE_CSS}
   var currentUsage = null;
   var chatHistory = [];
 
+  /* Helper escape untuk semua nilai dinamis yang dirender sebagai HTML. */
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /* Verbose logging untuk semua respon Cloudflare / server. */
+  function logApi(endpoint, meta, payload) {
+    try {
+      console.log('[cabe-chatbot] API ' + endpoint, meta);
+      if (payload !== undefined) console.log('[cabe-chatbot] API ' + endpoint + ' payload', payload);
+    } catch (e) {
+      console.warn('[cabe-chatbot] logApi failed', e);
+    }
+  }
+  function logApiError(endpoint, err) {
+    console.error('[cabe-chatbot] API ' + endpoint + ' ERROR', err);
+  }
+
   var userEmailEl = document.getElementById('user-email');
   var userPlanBadgeEl = document.getElementById('user-plan-badge');
   var planNameDisplayEl = document.getElementById('plan-name-display');
@@ -734,8 +757,13 @@ ${BASE_CSS}
   /* ---------- Refresh Usage & User ---------- */
   function loadUserData() {
     fetch('/api/user/usage').then(function(r) {
+      logApi('/api/user/usage', { status: r.status, ok: r.ok, statusText: r.statusText });
       if (r.status === 401) { gotoLogin(); return null; }
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
+      return r.json().then(function(data) {
+        logApi('/api/user/usage', { status: r.status, ok: r.ok, body: data });
+        return { ok: r.ok, status: r.status, data: data };
+      }).catch(function(jsonErr) {
+        logApiError('/api/user/usage', jsonErr);
         return { ok: false, status: r.status, data: null };
       });
     }).then(function(res) {
@@ -913,7 +941,14 @@ ${BASE_CSS}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }).then(function(r) {
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; });
+      logApi('/ingest', { status: r.status, ok: r.ok, statusText: r.statusText });
+      return r.json().then(function(data) {
+        logApi('/ingest', { status: r.status, ok: r.ok, body: data });
+        return { ok: r.ok, status: r.status, data: data };
+      }).catch(function(jsonErr) {
+        logApiError('/ingest', jsonErr);
+        return { ok: false, status: r.status, data: { error: 'Respon server tidak valid / bukan JSON (' + r.status + ')' } };
+      });
     }).then(function(res) {
       btn.disabled = false;
       if (!res.ok || (res.data && res.data.error)) {
@@ -934,8 +969,13 @@ ${BASE_CSS}
   /* ---------- Documents List ---------- */
   function loadDocs() {
     fetch('/api/documents').then(function(r) {
+      logApi('/api/documents', { status: r.status, ok: r.ok, statusText: r.statusText });
       if (r.status === 401) { gotoLogin(); return null; }
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
+      return r.json().then(function(data) {
+        logApi('/api/documents', { status: r.status, ok: r.ok, body: data });
+        return { ok: r.ok, status: r.status, data: data };
+      }).catch(function(jsonErr) {
+        logApiError('/api/documents', jsonErr);
         return { ok: false, status: r.status, data: { error: 'Respon server tidak valid (' + r.status + ')' } };
       });
     }).then(function(res) {
@@ -1023,13 +1063,21 @@ ${BASE_CSS}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: question })
     }).then(function(r) {
-      return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }).catch(function() {
-        return { ok: false, status: r.status, data: { error: 'Respon server tidak valid (' + r.status + ')' } };
+      logApi('/chat', { status: r.status, ok: r.ok, statusText: r.statusText });
+      return r.json().then(function(data) {
+        logApi('/chat', { status: r.status, ok: r.ok, body: data });
+        return { ok: r.ok, status: r.status, data: data };
+      }).catch(function(jsonErr) {
+        logApiError('/chat', jsonErr);
+        return { ok: false, status: r.status, data: { error: 'Respon server tidak valid / bukan JSON (' + r.status + '): ' + (jsonErr && jsonErr.message ? jsonErr.message : String(jsonErr)) } };
       });
     }).then(function(res) {
       btn.disabled = false;
       if (!res.ok || (res.data && res.data.error)) {
-        chatErrorEl.textContent = (res.data && res.data.error) || ('Gagal memproses pertanyaan (Status ' + res.status + ').');
+        var detail = 'Status ' + res.status + (res.statusText ? ' ' + res.statusText : '') + (res.data && res.data.error ? ': ' + res.data.error : '');
+        chatErrorEl.textContent = detail;
+        chatErrorEl.title = detail;
+        logApiError('/chat', { ok: res.ok, status: res.status, statusText: res.statusText, data: res.data });
         return;
       }
       chatHistory.push({
@@ -1042,7 +1090,10 @@ ${BASE_CSS}
       loadUserData(); // refresh daily chats quota counter
     }).catch(function(err) {
       btn.disabled = false;
-      chatErrorEl.textContent = 'Gagal mengirim pertanyaan: ' + (err && err.message ? err.message : String(err));
+      var detail = 'Gagal mengirim pertanyaan (jaringan/client): ' + (err && err.message ? err.message : String(err));
+      chatErrorEl.textContent = detail;
+      chatErrorEl.title = detail;
+      logApiError('/chat', err);
     });
   });
 
