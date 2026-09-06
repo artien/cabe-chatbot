@@ -131,7 +131,28 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--purple); ou
   border-radius: 999px;
 }
 .badge-free { background: var(--purple-soft); color: var(--purple-dark); border: 1px solid var(--border); }
-.badge-pro { background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3); }
+@keyframes spin { 100% { transform: rotate(360deg); } }
+.spinner-inline {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
+.payment-banner {
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(245,158,11,0.12), rgba(124,58,237,0.12));
+  border: 1px solid var(--gold);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
 .code-block {
   background: #1e1b2e;
   color: #e2e8f0;
@@ -539,6 +560,21 @@ ${BASE_CSS}
   </div>
 </header>
 
+<!-- Payment Auto-Polling Status Banner -->
+<div id="payment-status-banner" class="payment-banner" style="display:none;">
+  <div style="display:flex; align-items:center; gap:14px;">
+    <span id="payment-spinner" class="spinner-inline" style="width:22px; height:22px; border-width:3px; border-color:var(--gold); border-top-color:transparent;"></span>
+    <div>
+      <div style="font-weight:700; font-size:15px; color:var(--text);" id="payment-banner-title">Memverifikasi Pembayaran DOKU Checkout...</div>
+      <div style="font-size:13px; color:var(--muted);" id="payment-banner-desc">Invoice: <code id="payment-banner-invoice" style="color:var(--purple);font-weight:600;">-</code> • Auto-polling status pembayaran...</div>
+    </div>
+  </div>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <button type="button" class="btn btn-gold btn-sm" id="check-payment-btn">🔄 Cek Status</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="dismiss-payment-btn" style="opacity:0.75;">Tutup</button>
+  </div>
+</div>
+
 <!-- Plan & Quota Summary Banner -->
 <div class="usage-banner">
   <div class="usage-card">
@@ -562,10 +598,6 @@ ${BASE_CSS}
       <div class="progress-bg">
         <div class="progress-fill" id="chats-progress" style="width: 0%;"></div>
       </div>
-    </div>
-    <div class="usage-stat" style="flex:0 0 auto; display:flex; flex-direction:column; gap:6px;">
-      <div class="usage-label">Uji Coba Ganti Paket</div>
-      <button type="button" class="btn btn-ghost btn-sm" id="toggle-plan-btn">Beralih ke Pro</button>
     </div>
   </div>
 </div>
@@ -703,11 +735,18 @@ ${BASE_CSS}
   var userPlanBadgeEl = document.getElementById('user-plan-badge');
   var planNameDisplayEl = document.getElementById('plan-name-display');
   var upgradePlanBtn = document.getElementById('upgrade-plan-btn');
-  var togglePlanBtn = document.getElementById('toggle-plan-btn');
   var docsQuotaText = document.getElementById('docs-quota-text');
   var docsProgress = document.getElementById('docs-progress');
   var chatsQuotaText = document.getElementById('chats-quota-text');
   var chatsProgress = document.getElementById('chats-progress');
+
+  var paymentBanner = document.getElementById('payment-status-banner');
+  var paymentBannerTitle = document.getElementById('payment-banner-title');
+  var paymentBannerDesc = document.getElementById('payment-banner-desc');
+  var paymentBannerInvoice = document.getElementById('payment-banner-invoice');
+  var paymentSpinner = document.getElementById('payment-spinner');
+  var checkPaymentBtn = document.getElementById('check-payment-btn');
+  var dismissPaymentBtn = document.getElementById('dismiss-payment-btn');
 
   var widgetSection = document.getElementById('widget-section');
   var widgetPlanTag = document.getElementById('widget-plan-tag');
@@ -755,9 +794,8 @@ ${BASE_CSS}
     if (isPro) {
       userPlanBadgeEl.className = 'badge badge-pro';
       userPlanBadgeEl.textContent = '⭐ PRO';
-      planNameDisplayEl.innerHTML = '<span style="color:var(--gold)">⭐ Pro Plan</span>';
-      upgradePlanBtn.style.display = 'none';
-      togglePlanBtn.textContent = 'Beralih ke Free (Test)';
+      planNameDisplayEl.innerHTML = '<span style="color:var(--gold);font-weight:800;">⭐ Pro Plan</span>';
+      if (upgradePlanBtn) upgradePlanBtn.style.display = 'none';
 
       widgetSection.className = 'card full-col widget-card pro-active';
       widgetPlanTag.className = 'badge badge-pro';
@@ -774,8 +812,11 @@ ${BASE_CSS}
       userPlanBadgeEl.className = 'badge badge-free';
       userPlanBadgeEl.textContent = 'FREE';
       planNameDisplayEl.textContent = 'Free Plan';
-      upgradePlanBtn.style.display = 'inline-flex';
-      togglePlanBtn.textContent = 'Beralih ke Pro (Test)';
+      if (upgradePlanBtn) {
+        upgradePlanBtn.style.display = 'inline-flex';
+        upgradePlanBtn.disabled = false;
+        upgradePlanBtn.textContent = '🚀 Upgrade ke Pro';
+      }
 
       widgetSection.className = 'card full-col widget-card';
       widgetPlanTag.className = 'badge badge-free';
@@ -801,23 +842,186 @@ ${BASE_CSS}
     chatsProgress.className = 'progress-fill' + (chatsPct >= 100 ? ' full' : (chatsPct >= 70 ? ' warning' : ''));
   }
 
-  /* ---------- Change Plan (Upgrade / Toggle) ---------- */
-  function switchPlan(targetPlan) {
-    fetch('/api/user/plan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: targetPlan })
-    }).then(function(r) { return r.json(); })
-      .then(function() { loadUserData(); })
-      .catch(function(e) { alert('Gagal memperbarui paket: ' + e); });
+  /* ---------- DOKU Checkout & Auto-Polling ---------- */
+  var pollingTimer = null;
+  var pollAttempts = 0;
+  var MAX_POLL_ATTEMPTS = 60; // 60 x 2.5s = 2.5 minutes
+
+  function showPaymentBanner(title, desc, isPending, invoiceNum) {
+    if (!paymentBanner) return;
+    paymentBanner.style.display = 'flex';
+    if (paymentBannerTitle) paymentBannerTitle.textContent = title;
+    if (paymentBannerDesc) paymentBannerDesc.innerHTML = desc;
+    if (paymentBannerInvoice) paymentBannerInvoice.textContent = invoiceNum || '-';
+    if (paymentSpinner) paymentSpinner.style.display = isPending ? 'inline-block' : 'none';
   }
 
-  upgradePlanBtn.addEventListener('click', function() { switchPlan('pro'); });
-  if (unlockProBtn) unlockProBtn.addEventListener('click', function() { switchPlan('pro'); });
-  togglePlanBtn.addEventListener('click', function() {
-    var nextPlan = currentUsage && currentUsage.plan === 'pro' ? 'free' : 'pro';
-    switchPlan(nextPlan);
-  });
+  function hidePaymentBanner() {
+    if (paymentBanner) paymentBanner.style.display = 'none';
+    if (pollingTimer) {
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+    }
+  }
+
+  function startDokuCheckout() {
+    if (upgradePlanBtn) {
+      upgradePlanBtn.disabled = true;
+      upgradePlanBtn.textContent = '⏳ Membuka DOKU...';
+    }
+    if (unlockProBtn) {
+      unlockProBtn.disabled = true;
+      unlockProBtn.textContent = '⏳ Menyiapkan Pembayaran...';
+    }
+
+    fetch('/api/payment/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) {
+          alert('Gagal membuat pembayaran DOKU: ' + data.error);
+          if (upgradePlanBtn) { upgradePlanBtn.disabled = false; upgradePlanBtn.textContent = '🚀 Upgrade ke Pro'; }
+          if (unlockProBtn) { unlockProBtn.disabled = false; unlockProBtn.textContent = '⭐ Upgrade ke Pro Plan Sekarang (Buka Kunci Widget)'; }
+          return;
+        }
+        if (data.invoiceNumber && data.paymentUrl) {
+          localStorage.setItem('cabe_pending_invoice', data.invoiceNumber);
+          window.location.href = data.paymentUrl;
+        }
+      })
+      .catch(function(err) {
+        alert('Gagal menghubungi server: ' + err);
+        if (upgradePlanBtn) { upgradePlanBtn.disabled = false; upgradePlanBtn.textContent = '🚀 Upgrade ke Pro'; }
+        if (unlockProBtn) { unlockProBtn.disabled = false; unlockProBtn.textContent = '⭐ Upgrade ke Pro Plan Sekarang (Buka Kunci Widget)'; }
+      });
+  }
+
+  function checkInvoiceStatus(invoiceNumber, isManual) {
+    return fetch('/api/payment/status/' + encodeURIComponent(invoiceNumber))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.isPro || data.status === 'SUCCESS') {
+          if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+          localStorage.removeItem('cabe_pending_invoice');
+          showPaymentBanner(
+            '🎉 Pembayaran Berhasil!',
+            'Akun Anda kini aktif sebagai <strong>Pro Plan</strong>. Kuota 10 dokumen, 100 chat/hari, dan widget embed telah siap digunakan!',
+            false,
+            invoiceNumber
+          );
+          if (paymentBanner) {
+            paymentBanner.style.background = 'rgba(16, 185, 129, 0.15)';
+            paymentBanner.style.borderColor = 'var(--ok)';
+          }
+          loadUserData();
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+          }
+          setTimeout(function() { hidePaymentBanner(); }, 8000);
+          return true;
+        } else if (data.status === 'FAILED' || data.status === 'EXPIRED') {
+          if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+          localStorage.removeItem('cabe_pending_invoice');
+          showPaymentBanner(
+            '⚠️ Pembayaran Tidak Selesai',
+            'Status invoice: <strong>' + data.status + '</strong>. Silakan coba kembali upgrade ke Pro.',
+            false,
+            invoiceNumber
+          );
+          if (paymentBanner) {
+            paymentBanner.style.background = 'rgba(239, 68, 68, 0.15)';
+            paymentBanner.style.borderColor = 'var(--danger)';
+          }
+          return true;
+        } else {
+          if (isManual) {
+            showPaymentBanner(
+              '⏳ Status: ' + (data.status || 'PENDING'),
+              'Invoice: <code style="color:var(--purple);font-weight:600;">' + invoiceNumber + '</code> • Pembayaran belum terkonfirmasi di DOKU. Silakan selesaikan pembayaran.',
+              true,
+              invoiceNumber
+            );
+          }
+          return false;
+        }
+      })
+      .catch(function(err) {
+        console.error('Check status error:', err);
+        return false;
+      });
+  }
+
+  function startInvoicePolling(invoiceNumber) {
+    if (!invoiceNumber) return;
+    if (pollingTimer) clearInterval(pollingTimer);
+    pollAttempts = 0;
+
+    showPaymentBanner(
+      '⏳ Memverifikasi Pembayaran DOKU...',
+      'Invoice: <code style="color:var(--purple);font-weight:600;">' + invoiceNumber + '</code> • Menunggu konfirmasi pembayaran otomatis...',
+      true,
+      invoiceNumber
+    );
+
+    // Initial check
+    checkInvoiceStatus(invoiceNumber, false);
+
+    // Polling interval
+    pollingTimer = setInterval(function() {
+      pollAttempts++;
+      if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+        clearInterval(pollingTimer);
+        pollingTimer = null;
+        showPaymentBanner(
+          '⌛ Waktu Verifikasi Berakhir',
+          'Invoice: <code style="color:var(--purple);font-weight:600;">' + invoiceNumber + '</code> • Klik "Cek Status" jika Anda telah menyelesaikan pembayaran.',
+          false,
+          invoiceNumber
+        );
+        return;
+      }
+      checkInvoiceStatus(invoiceNumber, false);
+    }, 2500);
+  }
+
+  if (upgradePlanBtn) upgradePlanBtn.addEventListener('click', startDokuCheckout);
+  if (unlockProBtn) unlockProBtn.addEventListener('click', startDokuCheckout);
+
+  if (checkPaymentBtn) {
+    checkPaymentBtn.addEventListener('click', function() {
+      var inv = paymentBannerInvoice ? paymentBannerInvoice.textContent : '';
+      if (inv && inv !== '-') {
+        checkInvoiceStatus(inv, true);
+      } else {
+        fetch('/api/payment/latest')
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.invoice && d.invoice.id) {
+              startInvoicePolling(d.invoice.id);
+            } else {
+              alert('Belum ada data invoice pembayaran.');
+            }
+          });
+      }
+    });
+  }
+
+  if (dismissPaymentBtn) {
+    dismissPaymentBtn.addEventListener('click', function() {
+      hidePaymentBanner();
+    });
+  }
+
+  // Check URL query param or localStorage for pending payment
+  var urlParams = new URLSearchParams(window.location.search);
+  var invoiceFromUrl = urlParams.get('invoice');
+  var savedInvoice = localStorage.getItem('cabe_pending_invoice');
+  var activeInvoice = invoiceFromUrl || savedInvoice;
+  if (activeInvoice) {
+    startInvoicePolling(activeInvoice);
+  }
 
   /* ---------- Copy Helpers ---------- */
   copySnippetBtn.addEventListener('click', function() {

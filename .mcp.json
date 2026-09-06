@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "doku-docs": {
+      "type": "streamable-http",
+      "url": "https://developers.doku.com/~gitbook/mcp"
+    }
+  }
+}
