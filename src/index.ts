@@ -13,6 +13,12 @@ import {
   generateWidgetKey,
   AuthUser,
 } from './auth';
+import {
+  createDokuCheckout,
+  checkDokuOrderStatus,
+  isPaymentSuccessful,
+  DOKU_CONFIG,
+} from './doku';
 import { registerUiRoutes } from './ui';
 
 type Bindings = {
@@ -20,6 +26,9 @@ type Bindings = {
   VECTORIZE: VectorizeIndex;
   AI: any;
   AUTH_SECRET: string;
+  DOKU_CLIENT_ID?: string;
+  DOKU_SECRET_KEY?: string;
+  DOKU_BASE_URL?: string;
 };
 
 export const PLAN_LIMITS = {
@@ -491,46 +500,123 @@ const baseOpenApiSpec = {
         },
       },
     },
-    '/api/user/plan': {
+    '/api/payment/checkout': {
       post: {
-        summary: 'Ubah paket akun user (Free / Pro)',
+        summary: 'Buat sesi pembayaran DOKU Checkout untuk upgrade ke Pro Plan',
         description:
-          'Mengubah tingkat paket user antara Free dan Pro. Otomatis menghasilkan widget key jika belum ada. **Butuh login (cookie session).**',
+          'Membuat invoice baru dan menghasilkan payment URL DOKU Checkout (Sandbox) untuk upgrade ke Pro Plan (Rp 50.000). **Butuh login (cookie session).**',
         security: [{ cookieAuth: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object',
-                required: ['plan'],
-                properties: {
-                  plan: { type: 'string', enum: ['free', 'pro'], example: 'pro' },
-                },
-              },
-            },
-          },
-        },
         responses: {
           '200': {
-            description: 'Paket berhasil diperbarui.',
+            description: 'Sesi checkout DOKU berhasil dibuat.',
             content: {
               'application/json': {
                 schema: {
                   type: 'object',
                   properties: {
                     success: { type: 'boolean', example: true },
-                    plan: { type: 'string', enum: ['free', 'pro'] },
-                    isPro: { type: 'boolean' },
-                    widgetKey: { type: 'string', nullable: true },
-                    widget_key: { type: 'string', nullable: true },
+                    invoiceNumber: { type: 'string', example: 'INV-PRO-abc12345-1788704798000' },
+                    paymentUrl: { type: 'string', example: 'https://staging.doku.com/checkout-link-v2/...' },
+                    amount: { type: 'integer', example: 50000 },
                   },
                 },
               },
             },
           },
-          '400': { description: 'Pilihan plan tidak valid.' },
           '401': { description: 'Unauthorized.' },
+          '500': { description: 'Gagal membuat invoice DOKU.' },
+        },
+      },
+    },
+    '/api/payment/status/{invoiceNumber}': {
+      get: {
+        summary: 'Cek status pembayaran invoice DOKU Checkout (Auto-polling)',
+        description:
+          'Memeriksa status pembayaran invoice secara real-time ke DOKU API dan database lokal. Jika pembayaran sukses, akun otomatis di-upgrade ke Pro Plan dan menghasilkan widget key. **Butuh login (cookie session).**',
+        security: [{ cookieAuth: [] }],
+        parameters: [
+          {
+            name: 'invoiceNumber',
+            in: 'path',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Nomor invoice pembayaran DOKU.',
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Status pembayaran berhasil diperoleh.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    invoiceNumber: { type: 'string' },
+                    status: { type: 'string', example: 'SUCCESS' },
+                    isPaid: { type: 'boolean', example: true },
+                    isPro: { type: 'boolean', example: true },
+                    widgetKey: { type: 'string', nullable: true },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'Invoice tidak ditemukan.' },
+          '401': { description: 'Unauthorized.' },
+        },
+      },
+    },
+    '/api/payment/latest': {
+      get: {
+        summary: 'Ambil invoice pembayaran terakhir user',
+        description: 'Mengambil informasi invoice terakhir user beserta status pembayarannya. **Butuh login (cookie session).**',
+        security: [{ cookieAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Invoice terakhir user.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    invoice: {
+                      type: 'object',
+                      nullable: true,
+                      properties: {
+                        id: { type: 'string' },
+                        amount: { type: 'integer' },
+                        status: { type: 'string' },
+                        payment_url: { type: 'string' },
+                        created_at: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '401': { description: 'Unauthorized.' },
+        },
+      },
+    },
+    '/api/payment/notification': {
+      post: {
+        summary: 'Webhook notifikasi pembayaran DOKU',
+        description: 'Menerima callback/webhook asinkron dari DOKU saat pembayaran telah selesai dilakukan oleh pengguna.',
+        responses: {
+          '200': {
+            description: 'Webhook diterima dan diproses.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    message: { type: 'string', example: 'SUCCESS' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -843,37 +929,199 @@ app.get('/api/user/usage', authGuard, async (c) => {
   }
 });
 
-app.post('/api/user/plan', authGuard, async (c) => {
+// --------------------------------------------------------------------
+// DOKU Checkout Payment & Auto-Polling Endpoints
+// --------------------------------------------------------------------
+
+app.post('/api/payment/checkout', authGuard, async (c) => {
   try {
     const user = c.get('user');
-    const body = await c.req.json();
-    const newPlan = body.plan;
+    const origin = new URL(c.req.url).origin;
 
-    if (newPlan !== 'free' && newPlan !== 'pro') {
-      return c.json({ error: "Nilai plan harus 'free' atau 'pro'" }, 400);
-    }
+    const invoiceNumber = `INV-PRO-${user.id.slice(0, 8)}-${Date.now()}`;
+    const amount = DOKU_CONFIG.PRO_PLAN_AMOUNT;
 
-    let widgetKey = user.widget_key;
-    if (!widgetKey) {
-      widgetKey = generateWidgetKey();
-    }
+    // Create DOKU Checkout session
+    const checkoutResult = await createDokuCheckout({
+      env: c.env,
+      origin,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      },
+      invoiceNumber,
+      amount,
+    });
 
+    // Save invoice in D1 database
     await c.env.DB.prepare(
-      'UPDATE users SET plan = ?, widget_key = coalesce(widget_key, ?) WHERE id = ?'
+      `INSERT INTO invoices (id, user_id, amount, currency, status, payment_url)
+       VALUES (?, ?, ?, 'IDR', 'PENDING', ?)`
     )
-      .bind(newPlan, widgetKey, user.id)
+      .bind(invoiceNumber, user.id, amount, checkoutResult.paymentUrl)
       .run();
 
     return c.json({
       success: true,
-      plan: newPlan,
-      isPro: newPlan === 'pro',
-      widgetKey,
-      widget_key: widgetKey,
+      invoiceNumber,
+      paymentUrl: checkoutResult.paymentUrl,
+      amount,
     });
   } catch (error: any) {
-    console.error('Update plan error:', error);
-    return c.json({ error: error.message || 'Gagal memperbarui paket' }, 500);
+    console.error('Create payment checkout error:', error);
+    return c.json({ error: error.message || 'Gagal membuat sesi pembayaran DOKU' }, 500);
+  }
+});
+
+app.get('/api/payment/status/:invoiceNumber', authGuard, async (c) => {
+  try {
+    const user = c.get('user');
+    const invoiceNumber = c.req.param('invoiceNumber');
+
+    // Query invoice from local D1
+    const invoice = await c.env.DB.prepare(
+      'SELECT id, user_id, amount, status, payment_url, created_at FROM invoices WHERE id = ? AND user_id = ?'
+    )
+      .bind(invoiceNumber, user.id)
+      .first<{
+        id: string;
+        user_id: string;
+        amount: number;
+        status: string;
+        payment_url: string;
+        created_at: string;
+      }>();
+
+    if (!invoice) {
+      return c.json({ error: 'Invoice tidak ditemukan atau bukan milik Anda' }, 404);
+    }
+
+    // If already marked as SUCCESS locally
+    if (invoice.status === 'SUCCESS') {
+      let widgetKey = user.widget_key;
+      if (!widgetKey) {
+        widgetKey = generateWidgetKey();
+        await c.env.DB.prepare('UPDATE users SET plan = ?, widget_key = ? WHERE id = ?')
+          .bind('pro', widgetKey, user.id)
+          .run();
+      }
+      return c.json({
+        invoiceNumber,
+        status: 'SUCCESS',
+        isPaid: true,
+        isPro: true,
+        widgetKey,
+      });
+    }
+
+    // Query DOKU Check Status API
+    const dokuStatus = await checkDokuOrderStatus({
+      env: c.env,
+      invoiceNumber,
+    });
+
+    if (dokuStatus.isPaid) {
+      let widgetKey = user.widget_key;
+      if (!widgetKey) {
+        widgetKey = generateWidgetKey();
+      }
+
+      // Update invoice status to SUCCESS in D1
+      await c.env.DB.prepare(
+        'UPDATE invoices SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      )
+        .bind('SUCCESS', invoiceNumber)
+        .run();
+
+      // Upgrade user to Pro plan and assign widget_key in D1
+      await c.env.DB.prepare(
+        'UPDATE users SET plan = ?, widget_key = coalesce(widget_key, ?) WHERE id = ?'
+      )
+        .bind('pro', widgetKey, user.id)
+        .run();
+
+      return c.json({
+        invoiceNumber,
+        status: 'SUCCESS',
+        isPaid: true,
+        isPro: true,
+        widgetKey,
+      });
+    }
+
+    return c.json({
+      invoiceNumber,
+      status: dokuStatus.status || invoice.status,
+      isPaid: false,
+      isPro: false,
+    });
+  } catch (error: any) {
+    console.error('Check payment status error:', error);
+    return c.json({ error: error.message || 'Gagal memeriksa status pembayaran' }, 500);
+  }
+});
+
+app.get('/api/payment/latest', authGuard, async (c) => {
+  try {
+    const user = c.get('user');
+    const latestInvoice = await c.env.DB.prepare(
+      'SELECT id, amount, status, payment_url, created_at FROM invoices WHERE user_id = ? ORDER BY created_at DESC LIMIT 1'
+    )
+      .bind(user.id)
+      .first<{
+        id: string;
+        amount: number;
+        status: string;
+        payment_url: string;
+        created_at: string;
+      }>();
+
+    return c.json({ invoice: latestInvoice || null });
+  } catch (error: any) {
+    console.error('Get latest payment error:', error);
+    return c.json({ error: error.message || 'Gagal memuat info invoice' }, 500);
+  }
+});
+
+// DOKU Webhook Notification Endpoint
+app.post('/api/payment/notification', async (c) => {
+  try {
+    const body = (await c.req.json()) as any;
+    const invoiceNumber =
+      body?.order?.invoice_number ||
+      body?.invoice_number ||
+      body?.transaction?.invoice_number;
+    const status =
+      body?.transaction?.status ||
+      body?.order?.status ||
+      body?.status;
+
+    if (invoiceNumber && isPaymentSuccessful(status)) {
+      const invoice = await c.env.DB.prepare('SELECT user_id FROM invoices WHERE id = ?')
+        .bind(invoiceNumber)
+        .first<{ user_id: string }>();
+
+      if (invoice) {
+        await c.env.DB.prepare(
+          'UPDATE invoices SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        )
+          .bind('SUCCESS', invoiceNumber)
+          .run();
+
+        const widgetKey = generateWidgetKey();
+        await c.env.DB.prepare(
+          'UPDATE users SET plan = ?, widget_key = coalesce(widget_key, ?) WHERE id = ?'
+        )
+          .bind('pro', widgetKey, invoice.user_id)
+          .run();
+      }
+    }
+
+    return c.json({ message: 'SUCCESS' }, 200);
+  } catch (error: any) {
+    console.error('DOKU notification webhook error:', error);
+    return c.json({ error: error.message || 'Webhook error' }, 500);
   }
 });
 

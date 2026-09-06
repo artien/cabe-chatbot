@@ -34,3 +34,17 @@ CREATE TABLE IF NOT EXISTS daily_chat_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_daily_chat_usage_user_date ON daily_chat_usage(user_id, usage_date);
+
+CREATE TABLE IF NOT EXISTS invoices (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'IDR',
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  payment_url TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);

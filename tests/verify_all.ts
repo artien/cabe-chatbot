@@ -4,6 +4,7 @@ class MockD1 {
   users: any[] = [];
   documents: any[] = [];
   daily_chat_usage: any[] = [];
+  invoices: any[] = [];
 
   prepare(query: string) {
     const db = this;
@@ -41,6 +42,18 @@ class MockD1 {
         if (q.includes('SELECT count FROM daily_chat_usage WHERE user_id = ? AND usage_date = ?')) {
           const row = db.daily_chat_usage.find(r => r.user_id === binds[0] && r.usage_date === binds[1]);
           return { results: row ? [{ count: row.count } as any] : [] };
+        }
+        if (q.includes('SELECT id, user_id, amount, status, payment_url, created_at FROM invoices WHERE id = ? AND user_id = ?')) {
+          const inv = db.invoices.find(i => i.id === binds[0] && i.user_id === binds[1]);
+          return { results: inv ? [inv as any] : [] };
+        }
+        if (q.includes('SELECT id, amount, status, payment_url, created_at FROM invoices WHERE user_id = ? ORDER BY created_at DESC LIMIT 1')) {
+          const userInvs = db.invoices.filter(i => i.user_id === binds[0]);
+          return { results: userInvs.length > 0 ? [userInvs[userInvs.length - 1] as any] : [] };
+        }
+        if (q.includes('SELECT user_id FROM invoices WHERE id = ?')) {
+          const inv = db.invoices.find(i => i.id === binds[0]);
+          return { results: inv ? [{ user_id: inv.user_id } as any] : [] };
         }
         if (q.includes('SELECT') && q.includes('FROM documents WHERE user_id = ?')) {
           const userDocs = db.documents.filter(d => d.user_id === binds[0]);
@@ -101,6 +114,23 @@ class MockD1 {
         if (q.includes('UPDATE users SET widget_key = ? WHERE id = ?')) {
           const u = db.users.find(x => x.id === binds[1]);
           if (u) u.widget_key = binds[0];
+          return { success: true };
+        }
+        if (q.includes('INSERT INTO invoices')) {
+          db.invoices.push({
+            id: binds[0],
+            user_id: binds[1],
+            amount: binds[2],
+            currency: 'IDR',
+            status: 'PENDING',
+            payment_url: binds[3],
+            created_at: new Date().toISOString()
+          });
+          return { success: true };
+        }
+        if (q.includes('UPDATE invoices SET status = ?')) {
+          const inv = db.invoices.find(i => i.id === binds[1]);
+          if (inv) inv.status = binds[0];
           return { success: true };
         }
         if (q.includes('INSERT INTO documents')) {
@@ -246,15 +276,63 @@ async function runVerification() {
   }
   console.log('✔ 7. Widget chat blocked on Free with 403 (proRequired)');
 
-  // 8. Upgrade to Pro
-  const upg = await app.request('/api/user/plan', {
+  // 8. DOKU Payment Checkout & Upgrade Flow
+  const checkoutRes = await app.request('/api/payment/checkout', {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ plan: 'pro' })
   }, mockEnv);
-  const upgJson = await upg.json() as any;
-  if (upg.status !== 200 || upgJson.plan !== 'pro') throw new Error('Upgrade to Pro failed');
-  console.log('✔ 8. Upgrade user to Pro plan');
+  const checkoutJson = await checkoutRes.json() as any;
+  if (checkoutRes.status !== 200 || !checkoutJson.paymentUrl || !checkoutJson.invoiceNumber) {
+    throw new Error(`DOKU Checkout failed: ${checkoutRes.status} ${JSON.stringify(checkoutJson)}`);
+  }
+  console.log(`✔ 8a. DOKU Checkout created (Invoice: ${checkoutJson.invoiceNumber}, URL: ${checkoutJson.paymentUrl.slice(0, 40)}...)`);
+
+  // 8b. Check initial polling status (should be PENDING)
+  const pollInitial = await app.request(`/api/payment/status/${encodeURIComponent(checkoutJson.invoiceNumber)}`, {
+    method: 'GET',
+    headers: authHeaders,
+  }, mockEnv);
+  const pollInitialJson = await pollInitial.json() as any;
+  if (pollInitial.status !== 200) {
+    throw new Error(`Payment polling initial check failed: ${pollInitial.status}`);
+  }
+  console.log(`✔ 8b. Initial payment status polled (Status: ${pollInitialJson.status})`);
+
+  // 8c. Simulate DOKU payment notification webhook / confirmation
+  const webhookRes = await app.request('/api/payment/notification', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      order: { invoice_number: checkoutJson.invoiceNumber },
+      transaction: { status: 'SUCCESS' }
+    })
+  }, mockEnv);
+  if (webhookRes.status !== 200) {
+    throw new Error(`DOKU Webhook notification failed: ${webhookRes.status}`);
+  }
+  console.log('✔ 8c. DOKU Payment notification webhook received and processed');
+
+  // 8d. Verify polling status returns SUCCESS and activates Pro plan
+  const pollSuccess = await app.request(`/api/payment/status/${encodeURIComponent(checkoutJson.invoiceNumber)}`, {
+    method: 'GET',
+    headers: authHeaders,
+  }, mockEnv);
+  const pollSuccessJson = await pollSuccess.json() as any;
+  if (pollSuccess.status !== 200 || !pollSuccessJson.isPro || pollSuccessJson.status !== 'SUCCESS') {
+    throw new Error(`Payment polling status success check failed: ${JSON.stringify(pollSuccessJson)}`);
+  }
+  console.log('✔ 8d. Polling confirmation verified: account successfully upgraded to Pro plan');
+
+  // 8e. Verify latest invoice endpoint
+  const latestRes = await app.request('/api/payment/latest', {
+    method: 'GET',
+    headers: authHeaders,
+  }, mockEnv);
+  const latestJson = await latestRes.json() as any;
+  if (latestRes.status !== 200 || !latestJson.invoice || latestJson.invoice.id !== checkoutJson.invoiceNumber) {
+    throw new Error(`Latest invoice check failed: ${JSON.stringify(latestJson)}`);
+  }
+  console.log('✔ 8e. GET /api/payment/latest returned active invoice');
 
   // 9. Check Pro plan usage (10 docs, 100 chats/day)
   const proUsage = await app.request('/api/user/usage', { method: 'GET', headers: authHeaders }, mockEnv);
