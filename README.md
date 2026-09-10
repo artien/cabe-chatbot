@@ -4,7 +4,7 @@ A RAG (Retrieval-Augmented Generation) AI chatbot designed specifically for AFP 
 
 ## Overview
 
-This project implements an intelligent chatbot using Retrieval-Augmented Generation (RAG) technology to provide accurate, context-aware responses tailored for AFP CABE (Caisse d'Allocations Familiales - Family Benefits Fund). By combining information retrieval with generative AI, the chatbot can answer user queries with relevant information sourced from a curated knowledge base.
+This project implements an intelligent chatbot using Retrieval-Augmented Generation (RAG) technology to provide accurate, context-aware responses tailored for AFP CABE (Certified Ai Back End) e-course by Frenki Herlambang. By combining information retrieval with generative AI, the chatbot can answer user queries with relevant information sourced from a curated knowledge base.
 
 ## Features
 
